@@ -7,7 +7,8 @@ use oneclient_polyplus::{GroupKind, MAX_MESSAGE_LENGTH};
 
 use crate::chat::{ChatConversation, ChatMessage, MessageInvite, PendingMessage, ThreadStatus};
 use crate::components::{
-    Avatar, Button, ContextMenu, Icon, IconType, OVERLAY_MAX_LEVEL, ScrollArea, TextInput,
+    Avatar, Button, ContextMenu, Icon, IconType, LazySection, OVERLAY_MAX_LEVEL, ScrollArea,
+    TextInput,
 };
 use crate::hooks::{
     Actions, chat_draft, save_chat_draft, use_chat_invite_game, use_chat_online_count,
@@ -1156,37 +1157,37 @@ impl Component for Composer {
                         .font_size(text_size(12.))
                         .color(colors::fg_secondary())
                 }))
-                .child(
+                .child({
+                    // The full catalogue is ~1,900 emoji. Render only the rows
+                    // inside the viewport instead of one component per emoji.
+                    let mut pick_draft = draft;
                     ScrollArea::new()
                         .width(Size::fill())
                         .height(Size::auto())
                         .max_height(Size::px(EMOJI_GRID_MAX_HEIGHT_PX))
-                        .children(
-                            results
-                                .chunks(8)
-                                .map(|row| {
-                                    rect()
-                                        .horizontal()
-                                        .spacing(EMOJI_GAP_PX)
-                                        .children(
-                                            row.iter()
-                                                .map(|emoji| {
-                                                    let emoji = *emoji;
-                                                    EmojiCell {
-                                                        emoji,
-                                                        on_pick: EventHandler::new(move |_| {
-                                                            draft.write().push_str(emoji);
-                                                        }),
-                                                    }
-                                                    .into_element()
-                                                })
-                                                .collect::<Vec<_>>(),
-                                        )
-                                        .into_element()
-                                })
-                                .collect::<Vec<_>>(),
-                        ),
-                )
+                        .lazy_sections(
+                            vec![LazySection {
+                                header: false,
+                                count: results.len(),
+                            }],
+                            EMOJI_CELL_PX,
+                            EMOJI_GAP_PX,
+                            EMOJI_CELL_PX,
+                            8,
+                            0.,
+                            move |index| {
+                                let emoji = results[index];
+                                EmojiCell {
+                                    emoji,
+                                    on_pick: EventHandler::new(move |_| {
+                                        pick_draft.write().push_str(emoji);
+                                    }),
+                                }
+                                .into_element()
+                            },
+                            |_| rect().into_element(),
+                        )
+                })
         });
 
         rect()
