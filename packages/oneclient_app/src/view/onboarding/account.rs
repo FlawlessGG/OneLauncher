@@ -31,7 +31,6 @@ impl Component for OnboardingAccount {
             .as_ref()
             .map(|account| account_preview(account).into_element());
         let wrong_account: Option<Element> = account.as_ref().map(|account| {
-            let remove = remove.clone();
             let id = account.id;
             Button::new()
                 .ghost()
