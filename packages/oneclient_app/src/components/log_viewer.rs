@@ -151,6 +151,17 @@ fn parse_line(raw: &str) -> ParsedLine {
     ParsedLine { spans }
 }
 
+/// Scroll offset that puts an original log line near the middle of the viewport.
+fn jump_target_scroll(number: usize, count: usize, viewport_h: f32) -> f32 {
+    if count == 0 {
+        return 0.;
+    }
+    let index = number.saturating_sub(1).min(count - 1);
+    let wanted = -(BODY_PAD_TOP + index as f32 * LINE_H + LINE_H / 2. - viewport_h / 2.);
+    let content_h = count as f32 * LINE_H + BODY_PAD_TOP + BODY_PAD_BOTTOM;
+    corrected_scroll(content_h, viewport_h, wanted)
+}
+
 #[derive(PartialEq)]
 pub struct LogViewer {
     title: String,
@@ -158,6 +169,11 @@ pub struct LogViewer {
     streaming: bool,
     header: Option<Element>,
     actions: Option<Element>,
+    /// Original 1-based line numbers of filtered rows, so a search result can
+    /// be clicked to jump back to its place in the full log.
+    line_numbers: Option<Arc<Vec<usize>>>,
+    jump_to: Option<(usize, u64)>,
+    on_jump: Option<EventHandler<usize>>,
 }
 
 impl LogViewer {
@@ -168,6 +184,9 @@ impl LogViewer {
             streaming: false,
             header: None,
             actions: None,
+            line_numbers: None,
+            jump_to: None,
+            on_jump: None,
         }
     }
 
@@ -184,6 +203,23 @@ impl LogViewer {
     /// Controls placed in the title row, right of the title
     pub fn actions(mut self, actions: impl IntoElement) -> Self {
         self.actions = Some(actions.into_element());
+        self
+    }
+
+    pub fn line_numbers(mut self, numbers: Option<Arc<Vec<usize>>>) -> Self {
+        self.line_numbers = numbers;
+        self
+    }
+
+    /// Scroll to this original line number when the filtered view is replaced
+    /// by the full log. The counter makes repeated jumps to one line distinct.
+    pub fn jump_to(mut self, target: Option<(usize, u64)>) -> Self {
+        self.jump_to = target;
+        self
+    }
+
+    pub fn on_jump(mut self, handler: Option<EventHandler<usize>>) -> Self {
+        self.on_jump = handler;
         self
     }
 }
@@ -210,6 +246,35 @@ impl Component for LogViewer {
         let sel_focus = use_state::<Option<(usize, usize)>>(|| None);
         let selecting = use_state(|| false);
 
+        let mut line_count = use_state(|| 0usize);
+        line_count.set_if_modified(count);
+        let viewport_h = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0_f32)));
+
+        let highlight = use_state::<Option<usize>>(|| None);
+        let jump_to = self.jump_to;
+        let mut jump_scroll = scroll;
+        let mut jump_auto_scroll = auto_scroll;
+        let mut jump_highlight = highlight;
+        let effect_viewport_h = viewport_h.clone();
+        use_side_effect_with_deps(&jump_to, move |target| {
+            let Some((number, _)) = target else {
+                jump_highlight.set(None);
+                return;
+            };
+            jump_highlight.set(Some(*number));
+            let count = *line_count.peek();
+            if count == 0 {
+                return;
+            }
+            jump_scroll
+                .scroll_to_y(jump_target_scroll(*number, count, effect_viewport_h.get()) as i32);
+            if streaming {
+                jump_auto_scroll.set_if_modified(false);
+            }
+        });
+
+        let line_numbers = self.line_numbers.clone();
+        let on_jump = self.on_jump.clone();
         let stick_bottom = streaming && *auto_scroll.read();
 
         rect()
@@ -240,6 +305,7 @@ impl Component for LogViewer {
                         }
                     })
                     .content(move |ctx: ScrollAreaCtx| {
+                        viewport_h.set(ctx.viewport_h);
                         scroll_body(BodyArgs {
                             ctx,
                             scroll,
@@ -251,6 +317,9 @@ impl Component for LogViewer {
                             sel_anchor,
                             sel_focus,
                             selecting,
+                            line_numbers: line_numbers.clone(),
+                            on_jump: on_jump.clone(),
+                            highlight: *highlight.read(),
                         })
                     }),
             )
@@ -357,6 +426,9 @@ struct BodyArgs {
     sel_anchor: State<Option<(usize, usize)>>,
     sel_focus: State<Option<(usize, usize)>>,
     selecting: State<bool>,
+    line_numbers: Option<Arc<Vec<usize>>>,
+    on_jump: Option<EventHandler<usize>>,
+    highlight: Option<usize>,
 }
 
 fn scroll_body(args: BodyArgs) -> Element {
@@ -371,6 +443,9 @@ fn scroll_body(args: BodyArgs) -> Element {
         mut sel_anchor,
         mut sel_focus,
         mut selecting,
+        line_numbers,
+        on_jump,
+        highlight,
     } = args;
 
     let corrected_y = ctx.corrected_y;
@@ -489,10 +564,14 @@ fn scroll_body(args: BodyArgs) -> Element {
             body_w,
             num_col_w,
             selection,
+            line_numbers.as_deref().map(|numbers| numbers.as_slice()),
+            on_jump,
+            highlight,
         ))
         .into_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_body(
     lines: &[Arc<str>],
     content_h: f32,
@@ -501,6 +580,9 @@ fn log_body(
     body_w: f32,
     num_col_w: f32,
     selection: Option<((usize, usize), (usize, usize))>,
+    line_numbers: Option<&[usize]>,
+    on_jump: Option<EventHandler<usize>>,
+    highlight: Option<usize>,
 ) -> impl IntoElement {
     let count = lines.len();
     let scrolled = -corrected_y;
@@ -521,18 +603,33 @@ fn log_body(
             (c1 > c0).then_some((c0, c1))
         });
         let parsed = parse_line(raw);
-        body = body.child(log_line_row(i, &parsed, y, body_w, num_col_w, sel_cols));
+        let number = line_numbers
+            .and_then(|numbers| numbers.get(i).copied())
+            .unwrap_or(i + 1);
+        body = body.child(log_line_row(
+            number,
+            &parsed,
+            y,
+            body_w,
+            num_col_w,
+            sel_cols,
+            on_jump.clone(),
+            highlight == Some(number),
+        ));
     }
     body
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_line_row(
-    index: usize,
+    number: usize,
     parsed: &ParsedLine,
     y: f32,
     body_w: f32,
     num_col_w: f32,
     sel_cols: Option<(usize, usize)>,
+    on_jump: Option<EventHandler<usize>>,
+    jumped: bool,
 ) -> impl IntoElement {
     let mut message = paragraph()
         .max_lines(1)
@@ -544,7 +641,7 @@ fn log_line_row(
         message = message.span(Span::new(text.clone()).color(*color));
     }
 
-    let highlight = sel_cols.map(|(c0, c1)| {
+    let selection_highlight = sel_cols.map(|(c0, c1)| {
         rect()
             .position(
                 Position::new_absolute()
@@ -557,25 +654,83 @@ fn log_line_row(
             .background(colors::selection_bg())
             .into_element()
     });
+    let jumped_highlight = jumped.then(|| {
+        rect()
+            .position(Position::new_absolute().top(0.).left(0.))
+            .width(Size::fill())
+            .height(Size::fill())
+            .corner_radius(rounded(4.))
+            .background(colors::brand().with_a(38))
+            .into_element()
+    });
 
-    rect()
+    let number_col = rect()
+        .width(Size::px(num_col_w))
+        .child(
+            label()
+                .text(format!("{number}"))
+                .font_family(theme::mono_font())
+                .font_size(text_size(LINE_FONT_SIZE))
+                .text_align(TextAlign::Right)
+                .width(Size::fill())
+                .color(colors::code_muted()),
+        )
+        .into_element();
+
+    let row = rect()
         .horizontal()
         .position(Position::new_absolute().top(y).left(ROW_PAD_X))
         .width(Size::px((body_w - ROW_PAD_X * 2.).max(0.)))
         .height(Size::px(LINE_H))
         .cross_align(Alignment::Center)
         .spacing(NUM_GAP)
-        .maybe_child(highlight)
-        .child(
-            rect().width(Size::px(num_col_w)).child(
-                label()
-                    .text(format!("{}", index + 1))
-                    .font_family(theme::mono_font())
-                    .font_size(text_size(LINE_FONT_SIZE))
-                    .text_align(TextAlign::Right)
-                    .width(Size::fill())
-                    .color(colors::code_muted()),
-            ),
-        )
-        .child(message)
+        .maybe_child(jumped_highlight)
+        .maybe_child(selection_highlight)
+        .child(number_col)
+        .child(message);
+
+    match on_jump {
+        Some(handler) => row
+            .cursor(CursorIcon::Pointer)
+            .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
+            .on_press(move |e: Event<PressEventData>| {
+                e.stop_propagation();
+                handler.call(number);
+            }),
+        None => row,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jump_target_scroll;
+
+    #[test]
+    fn jump_centers_the_requested_line() {
+        let viewport = 160.;
+        let scroll = jump_target_scroll(10, 100, viewport);
+        // The tenth line sits at 9 * LINE_H; centering it scrolls up by
+        // roughly that offset plus the body padding, minus half a viewport.
+        assert!(scroll < 0.);
+        assert!(
+            (scroll
+                - (9. * super::LINE_H + super::BODY_PAD_TOP + super::LINE_H / 2. - viewport / 2.)
+                    * -1.)
+                .abs()
+                < 1.
+        );
+    }
+
+    #[test]
+    fn jump_clamps_to_the_available_lines() {
+        assert_eq!(jump_target_scroll(1, 0, 100.), 0.);
+        assert_eq!(
+            jump_target_scroll(500, 3, 100.),
+            jump_target_scroll(3, 3, 100.)
+        );
+        assert_eq!(
+            jump_target_scroll(0, 3, 100.),
+            jump_target_scroll(1, 3, 100.)
+        );
+    }
 }
