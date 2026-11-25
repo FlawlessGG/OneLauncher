@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::PoisonError;
 
 use super::*;
 
@@ -1001,7 +1002,9 @@ impl Component for ContentBox {
             // request is read in its own short critical section instead of
             // holding the mutex guard across them.
             let wanted = {
-                let request = crate::hooks::COPIES_REQUEST.lock().unwrap();
+                let request = crate::hooks::COPIES_REQUEST
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 request
                     .as_ref()
                     .filter(|(cluster, _)| *cluster == cluster_id)
@@ -1015,7 +1018,9 @@ impl Component for ContentBox {
                 return;
             }
             {
-                let mut request = crate::hooks::COPIES_REQUEST.lock().unwrap();
+                let mut request = crate::hooks::COPIES_REQUEST
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 if request
                     .as_ref()
                     .is_some_and(|(cluster, _)| *cluster == cluster_id)
