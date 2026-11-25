@@ -1112,6 +1112,7 @@ impl Component for Composer {
                     rect()
                         .horizontal()
                         .width(Size::fill())
+                        .height(Size::px(20.))
                         .padding(Gaps::new(2., 0., 0., 0.))
                         .spacing(8.)
                         .cross_align(Alignment::Center)
@@ -1123,7 +1124,7 @@ impl Component for Composer {
                                 .letter_spacing(0.44)
                                 .color(colors::fg_secondary()),
                         )
-                        .child(rect().width(Size::flex(1.)))
+                        .child(rect().width(Size::flex(1.)).height(Size::fill()))
                         .child(
                             Button::new()
                                 .ghost()
