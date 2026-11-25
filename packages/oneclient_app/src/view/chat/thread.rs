@@ -1158,6 +1158,7 @@ impl Component for Composer {
                 .child(
                     ScrollArea::new()
                         .width(Size::fill())
+                        .height(Size::auto())
                         .max_height(Size::px(EMOJI_GRID_MAX_HEIGHT_PX))
                         .children(
                             results
